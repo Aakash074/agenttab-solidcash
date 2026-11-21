@@ -23,7 +23,10 @@ pragma solidcash ^0.51.0;
 // funding flow and the trust surface, so lifecycle signals are custom errors and require messages instead.
 
 /// A satoshi amount. A user-defined value type keeps sats from being mixed up with raw voucher bytes.
-type Sats is int;
+/// It wraps `bigint`, not `int`: every value here is a BCH VM number read from a 64-bit field (an output value
+/// or the 8-byte voucher amount), so int256 overflow checks can never fire, and dropping them saves 32 bytes of
+/// script (see docs/solidcash-findings.md).
+type Sats is bigint;
 
 function satsAdd(Sats a, Sats b) pure returns (Sats) { return Sats.wrap(Sats.unwrap(a) + Sats.unwrap(b)); }
 function satsSub(Sats a, Sats b) pure returns (Sats) { return Sats.wrap(Sats.unwrap(a) - Sats.unwrap(b)); }
@@ -44,27 +47,26 @@ struct Split {
 error NotProvider();
 error NotOwner();
 error BadVoucher();
-error BelowDust(int value);
-error WrongShape(int inputs, int outputs);
-error Overclaim(int paid, int signed);
-error OwnerShortchanged(int paid, int owed);
-error WrongPayee(int outputIndex);
-error TokensNotAllowed(int outputIndex);
-error FeeTooHigh(int paid, int budget);
-error TooEarly(int timeout);
+error BelowDust(bigint value);
+error WrongShape(bigint inputs, bigint outputs);
+error Overclaim(bigint paid, bigint signed);
+error OwnerShortchanged(bigint paid, bigint owed);
+error WrongPayee(bigint outputIndex);
+error TokensNotAllowed(bigint outputIndex);
+error TooEarly(bigint timeout);
 
 /// Voucher encoding. The same bytes the TypeScript SDK signs (src/voucher.ts).
 library Voucher {
     bytes8 constant DOMAIN = 0x4147454e54544142; // "AGENTTAB"
 
-    function message(bytes32 txHash, int index, bytes8 amountBytes) internal pure returns (bytes) {
+    function message(bytes32 txHash, bigint index, bytes8 amountBytes) internal pure returns (bytes) {
         return DOMAIN + txHash + toPaddedBytes(index, 4) + amountBytes;
     }
 }
 
 /// Budget arithmetic for a settle.
 library TabMath {
-    int constant DUST = 546 sats;
+    bigint constant DUST = 546 sats;
 
     function split(Sats budget, Sats amount) internal pure returns (Split memory) {
         return Split({ providerMax: amount, ownerExact: budget - amount });
@@ -90,25 +92,25 @@ abstract contract TabRoles(pubkey owner, pubkey agent, pubkey provider) {
     /// A close spends exactly the one tab utxo and makes exactly the outputs its kind allows:
     /// no bundling of several tab utxos, no extra outputs siphoning value.
     modifier shaped(Close kind) {
-        int outputs = kind == Close.Settle ? 2 : 1;
+        bigint outputs = kind == Close.Settle ? 2 : 1;
         require(tx.inputs.length == 1 && tx.outputs.length == outputs,
             WrongShape(tx.inputs.length, tx.outputs.length));
         _;
     }
 
-    function paysTo(int i, pubkey who) internal view returns (bool) {
+    function paysTo(bigint i, pubkey who) internal view returns (bool) {
         return tx.outputs[i].lockingBytecode == new LockingBytecodeP2PKH(hash160(who));
     }
 
-    function noTokens(int i) internal view returns (bool) {
+    function noTokens(bigint i) internal view returns (bool) {
         return tx.outputs[i].tokenCategory == 0x;
     }
 }
 
-contract AgentTab(pubkey owner, pubkey agent, pubkey provider, int timeout) is TabRoles(owner, agent, provider) {
+contract AgentTab(pubkey owner, pubkey agent, pubkey provider, bigint timeout) is TabRoles(owner, agent, provider) {
     using TabMath for Sats;
 
-    int constant MAX_CANCEL_FEE = 1000 sats;
+    bigint constant MAX_CANCEL_FEE = 1000 sats;
 
     /// Provider closes the tab with the agent's highest voucher.
     function settle(sig providerSig, datasig voucher, bytes8 amountBytes)
@@ -119,7 +121,7 @@ contract AgentTab(pubkey owner, pubkey agent, pubkey provider, int timeout) is T
         bytes msg_ = Voucher.message(tx.inputs[0].outpointTransactionHash, tx.inputs[0].outpointIndex, amountBytes);
         require(checkDataSig(voucher, msg_, agent), BadVoucher());
 
-        Sats amount = Sats.wrap(int(amountBytes));
+        Sats amount = Sats.wrap(bigint(amountBytes));
         Sats budget = Sats.wrap(tx.inputs[0].value);
         Split memory s = TabMath.split(budget, amount);
         require(amount.aboveDust(), BelowDust(Sats.unwrap(amount)));
@@ -142,12 +144,12 @@ contract AgentTab(pubkey owner, pubkey agent, pubkey provider, int timeout) is T
         onlyProvider(providerSig)
     {
         require(paysTo(0, owner), WrongPayee(0));
-        require(tx.outputs[0].value >= tx.inputs[0].value - MAX_CANCEL_FEE, FeeTooHigh(tx.outputs[0].value, tx.inputs[0].value));
+        require(tx.outputs[0].value >= tx.inputs[0].value - MAX_CANCEL_FEE, "cancel: miner fee above 1000 sats");
         require(noTokens(0), TokensNotAllowed(0));
     }
 
     /// Owner reclaims everything once the timeout has passed (the tx must carry nLockTime >= timeout).
     function refund(sig ownerSig) onlyOwner(ownerSig) {
-        require(tx.time >= timeout, "tab still open: refund needs nLockTime >= timeout");
+        require(tx.time >= timeout, TooEarly(timeout));
     }
 }

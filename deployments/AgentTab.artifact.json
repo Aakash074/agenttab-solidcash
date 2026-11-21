@@ -1,0 +1,581 @@
+{
+  "contractName": "AgentTab",
+  "constructorInputs": [
+    {
+      "name": "owner",
+      "type": "pubkey"
+    },
+    {
+      "name": "agent",
+      "type": "pubkey"
+    },
+    {
+      "name": "provider",
+      "type": "pubkey"
+    },
+    {
+      "name": "timeout",
+      "type": "bigint"
+    }
+  ],
+  "abi": [
+    {
+      "name": "settle",
+      "selector": "4e02a928",
+      "inputs": [
+        {
+          "name": "providerSig",
+          "type": "sig"
+        },
+        {
+          "name": "voucher",
+          "type": "datasig"
+        },
+        {
+          "name": "amountBytes",
+          "type": "bytes8"
+        }
+      ],
+      "sourceEffectOrder": "unsupported-flow",
+      "signatureGuard": {
+        "key": {
+          "kind": "constructorArg",
+          "name": "provider"
+        }
+      }
+    },
+    {
+      "name": "cancel",
+      "selector": "6f0f574a",
+      "inputs": [
+        {
+          "name": "providerSig",
+          "type": "sig"
+        }
+      ],
+      "sourceEffectOrder": "unsupported-flow",
+      "signatureGuard": {
+        "key": {
+          "kind": "constructorArg",
+          "name": "provider"
+        }
+      }
+    },
+    {
+      "name": "refund",
+      "selector": "48f85df0",
+      "inputs": [
+        {
+          "name": "ownerSig",
+          "type": "sig"
+        }
+      ],
+      "sourceEffectOrder": "linear",
+      "signatureGuard": {
+        "key": {
+          "kind": "constructorArg",
+          "name": "owner"
+        }
+      }
+    }
+  ],
+  "bytecode": "007a517a94 OP_1 OP_DEFINE 007a517aa1 OP_2 OP_DEFINE 007a517aa2 OP_3 OP_DEFINE 007a517a9c OP_4 OP_DEFINE 084147454e54544142517a7e517a54807e517a7e OP_5 OP_DEFINE 5179598a527a527a518a598a7e OP_6 OP_DEFINE 022202517a538a OP_7 OP_DEFINE 007acd0376a914527aa97e0288ac7e87 OP_11 OP_DEFINE 007ad10087 OP_12 OP_DEFINE 567982588875005a8a69557a5479ad567900c900c8558a567a7c547abb547a8100c6787c568a78578a6976588a77588a75578a69547a005b8a6976588a7500cc528a69005c8a69537a515b8a6976588a77588a7551cc548a69515c8a696d6d51 4e02a928 OP_DEFINE 515a8a69557a547aad7c005b8a6900cc00c602e80394a269005c8a777777 6f0f574a OP_DEFINE 547a7cad7bb16d7551 48f85df0 OP_DEFINE 8263517f7c760100876375007c6776014f8763754f7c67768101510161a5638101509451807c6776014c876375517f7c01007e817f6776014d876375527f7c01007e817f6776014e876375547f7c01007e817f67817f68686868686867007c68 OP_8 OP_DEFINE 7682008763757501006782518763764f87637575014f6776817651a27c60a19a63758101509351806775517c7e686867758276014ba16351807c7e677602ff00a1635280517f75014c7c7e7c7e675380527f75014d7c7e7c7e68686868 OP_9 OP_DEFINE 00876352675168c3519c63c4789c670068 OP_10 OP_DEFINE OP_DEPTH OP_1SUB OP_ROLL OP_SIZE OP_4 OP_NUMEQUALVERIFY OP_INVOKE",
+  "source": "pragma solidcash ^0.51.0;\n\n// AgentTab (SolidCash port): a refundable, unidirectional payment channel (\"tab\") for an AI agent.\n//\n// Same protocol as the CashScript original (github.com/Aakash074/agenttab, AgentTab.cash):\n//  - The owner locks a budget in ONE utxo at this contract.\n//  - The agent key only signs off-chain vouchers for the CUMULATIVE amount owed:\n//        voucher = datasig(agent, \"AGENTTAB\" ++ outpointTxHash(32, LE) ++ outpointIndex(4, LE) ++ amount(8, LE))\n//    A voucher is bound to the exact funding outpoint, so it cannot be replayed on another tab or on a\n//    second utxo sent to the same address. The agent key can never move coins by itself.\n//  - settle (provider): output 0 -> provider, at most `amount` (provider pays the fee from its share);\n//                       output 1 -> owner, EXACTLY budget - amount.\n//  - cancel (provider): the whole budget back to the owner, minus a fee of at most 1000 sats.\n//  - refund (owner):    everything, after the absolute timeout (nLockTime; height < 500M, else unix time).\n//\n// Authorization is ONLY by signatures (checkSig / checkDataSig) against keys baked into the contract.\n// `msg.sender` and `tx.origin` are never read: in SolidCash they are derived from inputs the transaction\n// builder chooses, so they are not authentication.\n//\n// This contract is deliberately stateless (no state variables, mappings or events): a tab is one plain\n// P2SH32 utxo, exactly like the original, so it can be funded from any wallet and settled in a 1-in/2-out\n// transaction. `emit` would turn it into a stateful CashToken-backed contract, which would change the\n// funding flow and the trust surface, so lifecycle signals are custom errors and require messages instead.\n\n/// A satoshi amount. A user-defined value type keeps sats from being mixed up with raw voucher bytes.\n/// It wraps `bigint`, not `int`: every value here is a BCH VM number read from a 64-bit field (an output value\n/// or the 8-byte voucher amount), so int256 overflow checks can never fire, and dropping them saves 32 bytes of\n/// script (see docs/solidcash-findings.md).\ntype Sats is bigint;\n\nfunction satsAdd(Sats a, Sats b) pure returns (Sats) { return Sats.wrap(Sats.unwrap(a) + Sats.unwrap(b)); }\nfunction satsSub(Sats a, Sats b) pure returns (Sats) { return Sats.wrap(Sats.unwrap(a) - Sats.unwrap(b)); }\nfunction satsLte(Sats a, Sats b) pure returns (bool) { return Sats.unwrap(a) <= Sats.unwrap(b); }\nfunction satsGte(Sats a, Sats b) pure returns (bool) { return Sats.unwrap(a) >= Sats.unwrap(b); }\nfunction satsEq(Sats a, Sats b) pure returns (bool) { return Sats.unwrap(a) == Sats.unwrap(b); }\nusing { satsAdd as +, satsSub as -, satsLte as <=, satsGte as >=, satsEq as == } for Sats global;\n\n/// How a tab closes. Each way of closing has a fixed transaction shape.\nenum Close { Settle, Cancel }\n\n/// How the budget of a tab is divided by a settle.\nstruct Split {\n    Sats providerMax;   // the most the provider output may carry (the signed amount)\n    Sats ownerExact;    // exactly what the owner output must carry (budget - amount)\n}\n\nerror NotProvider();\nerror NotOwner();\nerror BadVoucher();\nerror BelowDust(bigint value);\nerror WrongShape(bigint inputs, bigint outputs);\nerror Overclaim(bigint paid, bigint signed);\nerror OwnerShortchanged(bigint paid, bigint owed);\nerror WrongPayee(bigint outputIndex);\nerror TokensNotAllowed(bigint outputIndex);\nerror TooEarly(bigint timeout);\n\n/// Voucher encoding. The same bytes the TypeScript SDK signs (src/voucher.ts).\nlibrary Voucher {\n    bytes8 constant DOMAIN = 0x4147454e54544142; // \"AGENTTAB\"\n\n    function message(bytes32 txHash, bigint index, bytes8 amountBytes) internal pure returns (bytes) {\n        return DOMAIN + txHash + toPaddedBytes(index, 4) + amountBytes;\n    }\n}\n\n/// Budget arithmetic for a settle.\nlibrary TabMath {\n    bigint constant DUST = 546 sats;\n\n    function split(Sats budget, Sats amount) internal pure returns (Split memory) {\n        return Split({ providerMax: amount, ownerExact: budget - amount });\n    }\n\n    function aboveDust(Sats v) internal pure returns (bool) {\n        return v >= Sats.wrap(DUST);\n    }\n}\n\n/// The three parties and their signature gates. No gate ever looks at msg.sender.\nabstract contract TabRoles(pubkey owner, pubkey agent, pubkey provider) {\n    modifier onlyProvider(sig s) {\n        require(checkSig(s, provider), NotProvider());\n        _;\n    }\n\n    modifier onlyOwner(sig s) {\n        require(checkSig(s, owner), NotOwner());\n        _;\n    }\n\n    /// A close spends exactly the one tab utxo and makes exactly the outputs its kind allows:\n    /// no bundling of several tab utxos, no extra outputs siphoning value.\n    modifier shaped(Close kind) {\n        bigint outputs = kind == Close.Settle ? 2 : 1;\n        require(tx.inputs.length == 1 && tx.outputs.length == outputs,\n            WrongShape(tx.inputs.length, tx.outputs.length));\n        _;\n    }\n\n    function paysTo(bigint i, pubkey who) internal view returns (bool) {\n        return tx.outputs[i].lockingBytecode == new LockingBytecodeP2PKH(hash160(who));\n    }\n\n    function noTokens(bigint i) internal view returns (bool) {\n        return tx.outputs[i].tokenCategory == 0x;\n    }\n}\n\ncontract AgentTab(pubkey owner, pubkey agent, pubkey provider, bigint timeout) is TabRoles(owner, agent, provider) {\n    using TabMath for Sats;\n\n    bigint constant MAX_CANCEL_FEE = 1000 sats;\n\n    /// Provider closes the tab with the agent's highest voucher.\n    function settle(sig providerSig, datasig voucher, bytes8 amountBytes)\n        shaped(Close.Settle)\n        onlyProvider(providerSig)\n    {\n        // The voucher must be the agent's signature over this exact funding outpoint and amount.\n        bytes msg_ = Voucher.message(tx.inputs[0].outpointTransactionHash, tx.inputs[0].outpointIndex, amountBytes);\n        require(checkDataSig(voucher, msg_, agent), BadVoucher());\n\n        Sats amount = Sats.wrap(bigint(amountBytes));\n        Sats budget = Sats.wrap(tx.inputs[0].value);\n        Split memory s = TabMath.split(budget, amount);\n        require(amount.aboveDust(), BelowDust(Sats.unwrap(amount)));\n        require(s.ownerExact.aboveDust(), BelowDust(Sats.unwrap(s.ownerExact)));\n\n        // Provider: at most the signed amount (the miner fee comes out of it).\n        require(paysTo(0, provider), WrongPayee(0));\n        require(Sats.wrap(tx.outputs[0].value) <= s.providerMax, Overclaim(tx.outputs[0].value, Sats.unwrap(amount)));\n        require(noTokens(0), TokensNotAllowed(0));\n\n        // Owner: exactly the remainder.\n        require(paysTo(1, owner), WrongPayee(1));\n        require(Sats.wrap(tx.outputs[1].value) == s.ownerExact, OwnerShortchanged(tx.outputs[1].value, Sats.unwrap(s.ownerExact)));\n        require(noTokens(1), TokensNotAllowed(1));\n    }\n\n    /// Provider waives the tab: everything goes back to the owner right away, minus a capped miner fee.\n    function cancel(sig providerSig)\n        shaped(Close.Cancel)\n        onlyProvider(providerSig)\n    {\n        require(paysTo(0, owner), WrongPayee(0));\n        require(tx.outputs[0].value >= tx.inputs[0].value - MAX_CANCEL_FEE, \"cancel: miner fee above 1000 sats\");\n        require(noTokens(0), TokensNotAllowed(0));\n    }\n\n    /// Owner reclaims everything once the timeout has passed (the tx must carry nLockTime >= timeout).\n    function refund(sig ownerSig) onlyOwner(ownerSig) {\n        require(tx.time >= timeout, TooEarly(timeout));\n    }\n}\n",
+  "debug": {
+    "bytecode": "05007a517a94518905007a517aa1528905007a517aa2538905007a517a9c548914084147454e54544142517a7e517a54807e517a7e55890d5179598a527a527a518a598a7e568907022202517a538a578910007acd0376a914527aa97e0288ac7e875b8905007ad100875c894c60567982588875005a8a69557a5479ad567900c900c8558a567a7c547abb547a8100c6787c568a78578a6976588a77588a75578a69547a005b8a6976588a7500cc528a69005c8a69537a515b8a6976588a77588a7551cc548a69515c8a696d6d51044e02a928891e515a8a69557a547aad7c005b8a6900cc00c602e80394a269005c8a777777046f0f574a8909547a7cad7bb16d75510448f85df0894c608263517f7c760100876375007c6776014f8763754f7c67768101510161a5638101509451807c6776014c876375517f7c01007e817f6776014d876375527f7c01007e817f6776014e876375547f7c01007e817f67817f68686868686867007c6858894c5d7682008763757501006782518763764f87637575014f6776817651a27c60a19a63758101509351806775517c7e686867758276014ba16351807c7e677602ff00a1635280517f75014c7c7e7c7e675380527f75014d7c7e7c7e6868686859891100876352675168c3519c63c4789c6700685a89748c7a82549d8a",
+    "sourceMap": "32::32:107;;;33::33:97;;;34::34;;;35::35:96;;;62:4:64:5;;;71::73;;;75::77;;;101::103;;;105::107;;;116::139;;;142::149;;;152::154;;;110:0:155:1;;;;;;;;;;;;;;;",
+    "logs": [],
+    "requires": [],
+    "functionDebug": {
+      "4e02a928": {
+        "requires": [
+          {
+            "ip": 9,
+            "line": 96,
+            "message": "require failed: WrongShape(...)"
+          },
+          {
+            "ip": 14,
+            "line": 83,
+            "message": "require failed: NotProvider(...)"
+          },
+          {
+            "ip": 28,
+            "line": 122,
+            "message": "require failed: BadVoucher(...)"
+          },
+          {
+            "ip": 41,
+            "line": 127,
+            "message": "require failed: BelowDust(...)"
+          },
+          {
+            "ip": 51,
+            "line": 128,
+            "message": "require failed: BelowDust(...)"
+          },
+          {
+            "ip": 57,
+            "line": 131,
+            "message": "require failed: WrongPayee(...)"
+          },
+          {
+            "ip": 66,
+            "line": 132,
+            "message": "require failed: Overclaim(...)"
+          },
+          {
+            "ip": 70,
+            "line": 133,
+            "message": "require failed: TokensNotAllowed(...)"
+          },
+          {
+            "ip": 76,
+            "line": 136,
+            "message": "require failed: WrongPayee(...)"
+          },
+          {
+            "ip": 88,
+            "line": 137,
+            "message": "require failed: OwnerShortchanged(...)"
+          },
+          {
+            "ip": 92,
+            "line": 138,
+            "message": "require failed: TokensNotAllowed(...)"
+          }
+        ],
+        "logs": [],
+        "sourceMap": "116:54:116:72;;;;;;117:15:117:27;95:33:95:45;;96:8:97:61:1;118:21:118:32:0;;83:28:83:36;;:8::54:1;121:103:121:114:0;;:85::86;:75::101:1;:47::48:0;:37::73:1;:21::115;;122:29:122:36:0;;:38::42;:44::49;;:8::66:1;124:39:124:50:0;;:32::51:1;125:42:125:43:0;:32::50:1;126:47:126:53:0;:39::45;:25::54:1;;127:16:127:22:0;:::34:1;;:8::68;128:16:128:17:0;:::28;;;;;;:::40:1;;:8::80;131:26:131:34:0;;:23::24;:16::35:1;;:8::52;132:50:132:51:0;:::63;;;:37::38;:26::45:1;:16::63;;:8::118;133:25:133:26:0;:16::27:1;;:8::50;136:26:136:31:0;;:23::24;:16::32:1;;:8::49;137:50:137:51:0;:::62;;;;;;:37::38;:26::45:1;:16::62;;:8::131;138:25:138:26:0;:16::27:1;;:8::50;116:4:139:5;;"
+      },
+      "6f0f574a": {
+        "requires": [
+          {
+            "ip": 3,
+            "line": 96,
+            "message": "require failed: WrongShape(...)"
+          },
+          {
+            "ip": 8,
+            "line": 83,
+            "message": "require failed: NotProvider(...)"
+          },
+          {
+            "ip": 13,
+            "line": 146,
+            "message": "require failed: WrongPayee(...)"
+          },
+          {
+            "ip": 21,
+            "line": 147,
+            "message": "cancel: miner fee above 1000 sats"
+          },
+          {
+            "ip": 25,
+            "line": 148,
+            "message": "require failed: TokensNotAllowed(...)"
+          }
+        ],
+        "logs": [],
+        "sourceMap": "143:15:143:27;95:33:95:45;;96:8:97:61:1;144:21:144:32:0;;83:28:83:36;;:8::54:1;146:26:146:31:0;:23::24;:16::32:1;;:8::49;147:27:147:28:0;:16::35:1;:49::50:0;:39::57:1;113:37:113:46:0;147:39:147:74:1;:16;:8::113;148:25:148:26:0;:16::27:1;:8::50;142:4:149:5;;"
+      },
+      "48f85df0": {
+        "requires": [
+          {
+            "ip": 3,
+            "line": 88,
+            "message": "require failed: NotOwner(...)"
+          },
+          {
+            "ip": 5,
+            "line": 153
+          }
+        ],
+        "logs": [],
+        "sourceMap": "152:44:152:52;;88:28:88:33;:8::48:1;153:27:153:34:0;:8::55:1;152:4:154:5;;"
+      }
+    },
+    "invokeDebug": {
+      "1": {
+        "bytecode": "007a517a94",
+        "name": "satsSub",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "32:84:32:85;;:101::102;;:72::103:1"
+      },
+      "2": {
+        "bytecode": "007a517aa1",
+        "name": "satsLte",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "33:74:33:75;;:92::93;;:62::94:1"
+      },
+      "3": {
+        "bytecode": "007a517aa2",
+        "name": "satsGte",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "34:74:34:75;;:92::93;;:62::94:1"
+      },
+      "4": {
+        "bytecode": "007a517a9c",
+        "name": "satsEq",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "35:73:35:74;;:91::92;;:61::93:1"
+      },
+      "5": {
+        "bytecode": "084147454e54544142517a7e517a54807e517a7e",
+        "name": "Voucher.message",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "60:29:60:47;63:24:63:30;;:15:::1;:47::52:0;;:54::55;:33::56:1;:15;:59::70:0;;:15:::1"
+      },
+      "6": {
+        "bytecode": "5179598a527a527a518a598a7e",
+        "name": "TabMath.split",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "72:36:72:42;;:15::74:1;;:65::71:0;;:56::62;;:::71:1;;:15::74;;"
+      },
+      "7": {
+        "bytecode": "022202517a538a",
+        "name": "TabMath.aboveDust",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "69:27:69:35;76:15:76:16;;:::35:1;"
+      },
+      "8": {
+        "bytecode": "8263517f7c760100876375007c6776014f8763754f7c67768101510161a5638101509451807c6776014c876375517f7c01007e817f6776014d876375527f7c01007e817f6776014e876375547f7c01007e817f67817f68686868686867007c68",
+        "name": "outlined source span 8",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "128:16:128:28;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;"
+      },
+      "9": {
+        "bytecode": "7682008763757501006782518763764f87637575014f6776817651a27c60a19a63758101509351806775517c7e686867758276014ba16351807c7e677602ff00a1635280517f75014c7c7e7c7e675380527f75014d7c7e7c7e68686868",
+        "name": "outlined source span 9",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "72:15:72:74:1;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;"
+      },
+      "10": {
+        "bytecode": "00876352675168c3519c63c4789c670068",
+        "name": "outlined source span 10",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "95:33:95:45;:25:::1;:::53:0;:48::49;:25::53:1;:52:::0;:25:::1;96:16:96:32:0;:36::37;:16:::1;:::69:0;:41::58;:62::69;:41:::1;:16;;"
+      },
+      "11": {
+        "bytecode": "007acd0376a914527aa97e0288ac7e87",
+        "name": "paysTo",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "102:26:102:27;;:15::44:1;:48::86:0;:81::84;;:73::85:1;:48::86;;;:15"
+      },
+      "12": {
+        "bytecode": "007ad10087",
+        "name": "noTokens",
+        "requires": [],
+        "logs": [],
+        "sourceMap": "106:26:106:27;;:15::42:1;:46::48:0;:15:::1"
+      }
+    }
+  },
+  "functionBodies": {
+    "4e02a928": "567982588875005a8a69557a5479ad567900c900c8558a567a7c547abb547a8100c6787c568a78578a6976588a77588a75578a69547a005b8a6976588a7500cc528a69005c8a69537a515b8a6976588a77588a7551cc548a69515c8a696d6d51",
+    "6f0f574a": "515a8a69557a547aad7c005b8a6900cc00c602e80394a269005c8a777777",
+    "48f85df0": "547a7cad7bb16d7551"
+  },
+  "fingerprint": "004170e934b54b096f2c02ec39bd8195f140909a432979e350f93c4f43882af5",
+  "structs": [
+    {
+      "name": "Split",
+      "fields": [
+        {
+          "name": "providerMax",
+          "type": "Sats"
+        },
+        {
+          "name": "ownerExact",
+          "type": "Sats"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "NotProvider",
+      "signature": "NotProvider()",
+      "parameters": []
+    },
+    {
+      "name": "NotOwner",
+      "signature": "NotOwner()",
+      "parameters": []
+    },
+    {
+      "name": "BadVoucher",
+      "signature": "BadVoucher()",
+      "parameters": []
+    },
+    {
+      "name": "BelowDust",
+      "signature": "BelowDust(bigint)",
+      "parameters": [
+        {
+          "name": "value",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "WrongShape",
+      "signature": "WrongShape(bigint,bigint)",
+      "parameters": [
+        {
+          "name": "inputs",
+          "type": "bigint"
+        },
+        {
+          "name": "outputs",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "Overclaim",
+      "signature": "Overclaim(bigint,bigint)",
+      "parameters": [
+        {
+          "name": "paid",
+          "type": "bigint"
+        },
+        {
+          "name": "signed",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "OwnerShortchanged",
+      "signature": "OwnerShortchanged(bigint,bigint)",
+      "parameters": [
+        {
+          "name": "paid",
+          "type": "bigint"
+        },
+        {
+          "name": "owed",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "WrongPayee",
+      "signature": "WrongPayee(bigint)",
+      "parameters": [
+        {
+          "name": "outputIndex",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "TokensNotAllowed",
+      "signature": "TokensNotAllowed(bigint)",
+      "parameters": [
+        {
+          "name": "outputIndex",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "TooEarly",
+      "signature": "TooEarly(bigint)",
+      "parameters": [
+        {
+          "name": "timeout",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "enums": [
+    {
+      "name": "Close",
+      "members": [
+        {
+          "name": "Settle",
+          "value": "0"
+        },
+        {
+          "name": "Cancel",
+          "value": "1"
+        }
+      ]
+    }
+  ],
+  "compiler": {
+    "name": "solidc",
+    "version": "0.51.1",
+    "options": {
+      "enforceFunctionParameterTypes": true,
+      "enforceLocktimeGuard": true,
+      "enforceFinalRequire": true,
+      "allowUnsafeOperations": false,
+      "commitmentLimit": 128,
+      "messageBus": false
+    }
+  },
+  "updatedAt": "2026-11-21T10:32:17.894Z",
+  "invocationAnalysis": {
+    "version": 1,
+    "protocolVersions": [
+      1
+    ],
+    "functions": [
+      {
+        "id": 8,
+        "name": "settle",
+        "arity": 3,
+        "entryPoint": true,
+        "selector": "4e02a928",
+        "calls": [
+          11,
+          12
+        ],
+        "closure": [
+          8,
+          11,
+          12
+        ],
+        "component": 0,
+        "recursive": false,
+        "reads": [],
+        "writes": [],
+        "effects": [],
+        "unknown": false,
+        "bounded": true,
+        "maximumDirectInvocations": 0
+      },
+      {
+        "id": 9,
+        "name": "cancel",
+        "arity": 1,
+        "entryPoint": true,
+        "selector": "6f0f574a",
+        "calls": [
+          11,
+          12
+        ],
+        "closure": [
+          9,
+          11,
+          12
+        ],
+        "component": 1,
+        "recursive": false,
+        "reads": [],
+        "writes": [],
+        "effects": [],
+        "unknown": false,
+        "bounded": true,
+        "maximumDirectInvocations": 0
+      },
+      {
+        "id": 10,
+        "name": "refund",
+        "arity": 1,
+        "entryPoint": true,
+        "selector": "48f85df0",
+        "calls": [],
+        "closure": [
+          10
+        ],
+        "component": 2,
+        "recursive": false,
+        "reads": [],
+        "writes": [],
+        "effects": [],
+        "unknown": false,
+        "bounded": true,
+        "maximumDirectInvocations": 0
+      },
+      {
+        "id": 11,
+        "name": "paysTo",
+        "arity": 2,
+        "entryPoint": false,
+        "calls": [],
+        "closure": [
+          11
+        ],
+        "component": 3,
+        "recursive": false,
+        "reads": [],
+        "writes": [],
+        "effects": [],
+        "unknown": false,
+        "bounded": true,
+        "maximumDirectInvocations": 0
+      },
+      {
+        "id": 12,
+        "name": "noTokens",
+        "arity": 1,
+        "entryPoint": false,
+        "calls": [],
+        "closure": [
+          12
+        ],
+        "component": 4,
+        "recursive": false,
+        "reads": [],
+        "writes": [],
+        "effects": [],
+        "unknown": false,
+        "bounded": true,
+        "maximumDirectInvocations": 0
+      }
+    ],
+    "components": [
+      {
+        "id": 0,
+        "functions": [
+          8
+        ],
+        "recursive": false
+      },
+      {
+        "id": 1,
+        "functions": [
+          9
+        ],
+        "recursive": false
+      },
+      {
+        "id": 2,
+        "functions": [
+          10
+        ],
+        "recursive": false
+      },
+      {
+        "id": 3,
+        "functions": [
+          11
+        ],
+        "recursive": false
+      },
+      {
+        "id": 4,
+        "functions": [
+          12
+        ],
+        "recursive": false
+      }
+    ]
+  }
+}

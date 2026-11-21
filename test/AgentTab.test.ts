@@ -191,7 +191,7 @@ describe('AgentTab.scash: the seven attacks', () => {
     c.provider.increaseTime(TIMEOUT - BigInt(c.provider.getBlockTime()) + 10n);
     await covenantRejects(
       buildRefund({ provider: c.provider, contract: c.contract, tabUtxo: c.tab, ownerPriv: c.owner.priv, timeout: TIMEOUT - 1n }),
-      /tab still open|tx\.time|locktime/i,
+      /TooEarly/,
     );
   });
 
@@ -213,7 +213,7 @@ describe('AgentTab.scash: the seven attacks', () => {
       return b;
     };
     await covenantRejects(cancel([{ to: p2pkhAddress(c.svc.pub), amount: BUDGET - 900n }]), /WrongPayee/);              // own wallet
-    await covenantRejects(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 1_500n }]), /FeeTooHigh/);          // fee above cap
+    await covenantRejects(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 1_500n }]), /miner fee above 1000 sats/);          // fee above cap
     await covenantRejects(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 900n }], c.owner.priv), /NotProvider|checkSig|NULLFAIL|signature/i); // owner key
     await covenantRejects(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 5_000n }, { to: p2pkhAddress(c.svc.pub), amount: 4_000n }]), /WrongShape/); // split
     await send(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 900n }]));                                     // honest
