@@ -10,16 +10,31 @@
     "solidhat:deploy": "solidhat deploy",
     "solidhat:clean": "solidhat clean",
     "test": "solidhat test",
-    "compile": "solidhat compile"
+    "compile": "solidhat compile",
+    "artifact": "solidhat compile && cp artifacts/solidcash/contracts/AgentTab.scash/AgentTab.json deployments/AgentTab.artifact.json",
+    "page": "vite --config apps/mainnet/vite.config.ts",
+    "page:build": "vite build --config apps/mainnet/vite.config.ts",
+    "keys": "tsx scripts/mainnet-keys.ts",
+    "settle": "tsx scripts/mainnet-settle.ts",
+    "chipnet": "tsx scripts/chipnet-demo.ts"
   },
   "devDependencies": {
     "@solidcash/solidhat": "0.51.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.3.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.2",
+    "vite": "8.3.8",
     "vitest": "^5.0.4"
   },
   "dependencies": {
     "@solidcash/solidc": "0.51.1",
-    "@solidcash/solidcash": "0.51.1"
+    "@solidcash/solidcash": "0.51.1",
+    "@wizardconnect/core": "0.2.10",
+    "@wizardconnect/dapp": "0.2.7",
+    "@wizardconnect/react": "0.2.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   }
 }

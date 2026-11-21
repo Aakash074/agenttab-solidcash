@@ -8,3 +8,5 @@ node_modules/
 keys/
 typechain-types/
 dist/
+apps/mainnet/public/tab-config.json
+apps/mainnet/dist/

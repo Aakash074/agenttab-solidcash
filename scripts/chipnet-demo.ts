@@ -1,6 +1,6 @@
 // Chipnet run of the SolidCash AgentTab: open a tab -> the agent signs 3 cumulative vouchers -> the provider
 // settles the highest one, exact remainder back to the owner. Keys come from ./.env (made by scripts/keygen.ts);
-// nothing secret is printed. Usage: npx tsx scripts/chipnet-demo.ts [budgetSats] [settle|cancel|refund]
+// nothing secret is printed. Usage: npx tsx scripts/chipnet-demo.ts [budgetSats] [settle|cancel|refund|open]
 import { readFileSync } from 'node:fs';
 import { ElectrumNetworkProvider } from '@solidcash/solidcash/network/electrum';
 import { hexToBin } from '@bitauth/libauth';
@@ -43,7 +43,10 @@ for (let i = 0; i < 20 && !tab; i++) {
 }
 if (!tab) throw new Error('tab utxo not visible yet');
 
-if (mode === 'refund') {
+if (mode === 'open') {
+  // Leaves the tab open, like the page does; settle it with scripts/mainnet-settle.ts --net chipnet.
+  console.log(`settle with: npm run settle -- --net chipnet --owner ${Buffer.from(ownerPub).toString('hex')} --timeout ${timeout} --txid ${open.txid} --vout 0`);
+} else if (mode === 'refund') {
   const tx = await buildRefund({ provider, contract, tabUtxo: tab, ownerPriv: owner, timeout }).send();
   console.log('REFUND      ', tx.txid);
 } else if (mode === 'cancel') {

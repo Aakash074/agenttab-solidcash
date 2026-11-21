@@ -91,6 +91,12 @@ async function addTabUtxo(c: Ctx, satoshis: bigint): Promise<Utxo> {
 }
 
 describe('AgentTab.scash: artifact', () => {
+  it('the committed deployment artifact is exactly what solidc compiles from contracts/AgentTab.scash today', async () => {
+    const fresh = (await import('../artifacts/solidcash/contracts/AgentTab.scash/AgentTab.json', { with: { type: 'json' } })).default as any;
+    expect((artifact as any).bytecode).toBe(fresh.bytecode);
+    expect((artifact as any).fingerprint).toBe(fresh.fingerprint);
+  });
+
   it('compiles to a small stateless P2SH32 script with the three entry points', () => {
     expect(artifact.abi.map((f: { name: string }) => f.name)).toEqual(['settle', 'cancel', 'refund']);
     expect(artifact.constructorInputs.map((i: { name: string }) => i.name)).toEqual(['owner', 'agent', 'provider', 'timeout']);

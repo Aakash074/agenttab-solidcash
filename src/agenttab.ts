@@ -18,7 +18,9 @@ import {
   secp256k1,
   sha256,
 } from '@bitauth/libauth';
-import artifact from '../artifacts/solidcash/contracts/AgentTab.scash/AgentTab.artifact.js';
+// The exact artifact that was deployed (chipnet) and is meant for mainnet. test/AgentTab.test.ts checks it
+// matches a fresh compile of contracts/AgentTab.scash; refresh it with `npm run artifact`.
+import artifact from '../deployments/AgentTab.artifact.json' with { type: 'json' };
 
 export { artifact };
 
