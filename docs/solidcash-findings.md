@@ -174,3 +174,19 @@ and every attempt is rejected.
 - The SDK API is close enough to CashScript's that the AgentTab SDK ported in about an hour.
 
 ## Patch validation
+
+All three patches apply cleanly to upstream `master` (`eda85a88d`) with `git apply --check`. They were tested
+against the upstream sources run through `tsx`. The monorepo cannot be installed from a fresh clone (F9), so the
+clone's `node_modules` was symlinked to this project's installed tree.
+
+| Patch | What ran | Result |
+|---|---|---|
+| 0001 warning text | `packages/solidcash/test/framed/shapes/revert-partway.test.ts`, which pins the warning text | 6/6 pass |
+| 0002 `--no-sample` README | `packages/solidhat/test/init.test.ts`, the new test | passes |
+| 0003 struct SROA | new `ScalarReplaceStructLocals.test.ts` | 7/7 pass |
+| 0003 struct SROA | **full `packages/solidc` suite** (527 files, 7,801 tests) | 7,792 pass, 8 skipped. The 18 files that fail cannot load in this setup: 15 import `../dist/compiler.js` (no build), 1 needs `@openzeppelin/contracts`, and 2 hit a test-file parse error under vitest 5.1.1 / rolldown ("Identifier `sha256` has already been declared"). None of them reaches the new pass. |
+| 0003 struct SROA | `tsc --noEmit` on the new pass with the package's build tsconfig | clean |
+
+AgentTab itself compiles to the same 489 bytes with or without patch 0003, because its `Split` comes from the
+`TabMath.split` call, and the pass leaves call-initialized locals alone. That keeps the deployed artifact
+reproducible with the released 0.51.1.
