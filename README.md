@@ -141,6 +141,9 @@ docs/                         chipnet proof, SolidCash findings, repros, patches
 
 License: MIT, the same as the original.
 
+## Mainnet
+Open 8c10fcd4…4fa0 → settle 0fd00a08…a89d on BCH mainnet: exactly 18,000 sats forced back to the owner. Details: [docs/mainnet-proof.md](docs/mainnet-proof.md).
+
 ## Upstream contributions
 Pull requests opened against solidcash/solidcash from the findings in `docs/solidcash-findings.md`:
 - https://github.com/solidcash/solidcash/pull/16 — accurate warning for `revert` with a custom error (F2)
