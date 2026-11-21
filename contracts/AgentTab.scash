@@ -1,0 +1,153 @@
+pragma solidcash ^0.51.0;
+
+// AgentTab (SolidCash port): a refundable, unidirectional payment channel ("tab") for an AI agent.
+//
+// Same protocol as the CashScript original (github.com/Aakash074/agenttab, AgentTab.cash):
+//  - The owner locks a budget in ONE utxo at this contract.
+//  - The agent key only signs off-chain vouchers for the CUMULATIVE amount owed:
+//        voucher = datasig(agent, "AGENTTAB" ++ outpointTxHash(32, LE) ++ outpointIndex(4, LE) ++ amount(8, LE))
+//    A voucher is bound to the exact funding outpoint, so it cannot be replayed on another tab or on a
+//    second utxo sent to the same address. The agent key can never move coins by itself.
+//  - settle (provider): output 0 -> provider, at most `amount` (provider pays the fee from its share);
+//                       output 1 -> owner, EXACTLY budget - amount.
+//  - cancel (provider): the whole budget back to the owner, minus a fee of at most 1000 sats.
+//  - refund (owner):    everything, after the absolute timeout (nLockTime; height < 500M, else unix time).
+//
+// Authorization is ONLY by signatures (checkSig / checkDataSig) against keys baked into the contract.
+// `msg.sender` and `tx.origin` are never read: in SolidCash they are derived from inputs the transaction
+// builder chooses, so they are not authentication.
+//
+// This contract is deliberately stateless (no state variables, mappings or events): a tab is one plain
+// P2SH32 utxo, exactly like the original, so it can be funded from any wallet and settled in a 1-in/2-out
+// transaction. `emit` would turn it into a stateful CashToken-backed contract, which would change the
+// funding flow and the trust surface, so lifecycle signals are custom errors and require messages instead.
+
+/// A satoshi amount. A user-defined value type keeps sats from being mixed up with raw voucher bytes.
+type Sats is int;
+
+function satsAdd(Sats a, Sats b) pure returns (Sats) { return Sats.wrap(Sats.unwrap(a) + Sats.unwrap(b)); }
+function satsSub(Sats a, Sats b) pure returns (Sats) { return Sats.wrap(Sats.unwrap(a) - Sats.unwrap(b)); }
+function satsLte(Sats a, Sats b) pure returns (bool) { return Sats.unwrap(a) <= Sats.unwrap(b); }
+function satsGte(Sats a, Sats b) pure returns (bool) { return Sats.unwrap(a) >= Sats.unwrap(b); }
+function satsEq(Sats a, Sats b) pure returns (bool) { return Sats.unwrap(a) == Sats.unwrap(b); }
+using { satsAdd as +, satsSub as -, satsLte as <=, satsGte as >=, satsEq as == } for Sats global;
+
+/// How a tab closes. Each way of closing has a fixed transaction shape.
+enum Close { Settle, Cancel }
+
+/// How the budget of a tab is divided by a settle.
+struct Split {
+    Sats providerMax;   // the most the provider output may carry (the signed amount)
+    Sats ownerExact;    // exactly what the owner output must carry (budget - amount)
+}
+
+error NotProvider();
+error NotOwner();
+error BadVoucher();
+error BelowDust(int value);
+error WrongShape(int inputs, int outputs);
+error Overclaim(int paid, int signed);
+error OwnerShortchanged(int paid, int owed);
+error WrongPayee(int outputIndex);
+error TokensNotAllowed(int outputIndex);
+error FeeTooHigh(int paid, int budget);
+error TooEarly(int timeout);
+
+/// Voucher encoding. The same bytes the TypeScript SDK signs (src/voucher.ts).
+library Voucher {
+    bytes8 constant DOMAIN = 0x4147454e54544142; // "AGENTTAB"
+
+    function message(bytes32 txHash, int index, bytes8 amountBytes) internal pure returns (bytes) {
+        return DOMAIN + txHash + toPaddedBytes(index, 4) + amountBytes;
+    }
+}
+
+/// Budget arithmetic for a settle.
+library TabMath {
+    int constant DUST = 546 sats;
+
+    function split(Sats budget, Sats amount) internal pure returns (Split memory) {
+        return Split({ providerMax: amount, ownerExact: budget - amount });
+    }
+
+    function aboveDust(Sats v) internal pure returns (bool) {
+        return v >= Sats.wrap(DUST);
+    }
+}
+
+/// The three parties and their signature gates. No gate ever looks at msg.sender.
+abstract contract TabRoles(pubkey owner, pubkey agent, pubkey provider) {
+    modifier onlyProvider(sig s) {
+        require(checkSig(s, provider), NotProvider());
+        _;
+    }
+
+    modifier onlyOwner(sig s) {
+        require(checkSig(s, owner), NotOwner());
+        _;
+    }
+
+    /// A close spends exactly the one tab utxo and makes exactly the outputs its kind allows:
+    /// no bundling of several tab utxos, no extra outputs siphoning value.
+    modifier shaped(Close kind) {
+        int outputs = kind == Close.Settle ? 2 : 1;
+        require(tx.inputs.length == 1 && tx.outputs.length == outputs,
+            WrongShape(tx.inputs.length, tx.outputs.length));
+        _;
+    }
+
+    function paysTo(int i, pubkey who) internal view returns (bool) {
+        return tx.outputs[i].lockingBytecode == new LockingBytecodeP2PKH(hash160(who));
+    }
+
+    function noTokens(int i) internal view returns (bool) {
+        return tx.outputs[i].tokenCategory == 0x;
+    }
+}
+
+contract AgentTab(pubkey owner, pubkey agent, pubkey provider, int timeout) is TabRoles(owner, agent, provider) {
+    using TabMath for Sats;
+
+    int constant MAX_CANCEL_FEE = 1000 sats;
+
+    /// Provider closes the tab with the agent's highest voucher.
+    function settle(sig providerSig, datasig voucher, bytes8 amountBytes)
+        shaped(Close.Settle)
+        onlyProvider(providerSig)
+    {
+        // The voucher must be the agent's signature over this exact funding outpoint and amount.
+        bytes msg_ = Voucher.message(tx.inputs[0].outpointTransactionHash, tx.inputs[0].outpointIndex, amountBytes);
+        require(checkDataSig(voucher, msg_, agent), BadVoucher());
+
+        Sats amount = Sats.wrap(int(amountBytes));
+        Sats budget = Sats.wrap(tx.inputs[0].value);
+        Split memory s = TabMath.split(budget, amount);
+        require(amount.aboveDust(), BelowDust(Sats.unwrap(amount)));
+        require(s.ownerExact.aboveDust(), BelowDust(Sats.unwrap(s.ownerExact)));
+
+        // Provider: at most the signed amount (the miner fee comes out of it).
+        require(paysTo(0, provider), WrongPayee(0));
+        require(Sats.wrap(tx.outputs[0].value) <= s.providerMax, Overclaim(tx.outputs[0].value, Sats.unwrap(amount)));
+        require(noTokens(0), TokensNotAllowed(0));
+
+        // Owner: exactly the remainder.
+        require(paysTo(1, owner), WrongPayee(1));
+        require(Sats.wrap(tx.outputs[1].value) == s.ownerExact, OwnerShortchanged(tx.outputs[1].value, Sats.unwrap(s.ownerExact)));
+        require(noTokens(1), TokensNotAllowed(1));
+    }
+
+    /// Provider waives the tab: everything goes back to the owner right away, minus a capped miner fee.
+    function cancel(sig providerSig)
+        shaped(Close.Cancel)
+        onlyProvider(providerSig)
+    {
+        require(paysTo(0, owner), WrongPayee(0));
+        require(tx.outputs[0].value >= tx.inputs[0].value - MAX_CANCEL_FEE, FeeTooHigh(tx.outputs[0].value, tx.inputs[0].value));
+        require(noTokens(0), TokensNotAllowed(0));
+    }
+
+    /// Owner reclaims everything once the timeout has passed (the tx must carry nLockTime >= timeout).
+    function refund(sig ownerSig) onlyOwner(ownerSig) {
+        require(tx.time >= timeout, "tab still open: refund needs nLockTime >= timeout");
+    }
+}

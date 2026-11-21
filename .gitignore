@@ -1,0 +1,10 @@
+artifacts/solidcash/
+cache/solidcash/
+node_modules/
+.env
+.env.*
+!.env.example
+*.wif
+keys/
+typechain-types/
+dist/
