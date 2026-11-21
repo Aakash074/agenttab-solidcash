@@ -1,0 +1,10 @@
+pragma solidcash ^0.51.0;
+// F3 baseline: bigint.
+contract BigintChecks(pubkey pk) {
+    function f(sig s) {
+        require(checkSig(s, pk));
+        bigint fee = tx.inputs[0].value - tx.outputs[0].value;
+        require(fee <= 1000);
+        require(tx.outputs[0].value + fee == tx.inputs[0].value);
+    }
+}

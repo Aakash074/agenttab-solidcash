@@ -1,0 +1,10 @@
+pragma solidcash ^0.51.0;
+// F1: a struct LOCAL that never leaves the function still goes through the pushdata struct codec.
+struct Pair { bigint a; bigint b; }
+contract StructLocal(pubkey pk) {
+    function f(sig s, bigint x) {
+        require(checkSig(s, pk));
+        Pair memory p = Pair({ a: tx.inputs[0].value, b: tx.outputs[0].value + x });
+        require(p.a >= p.b);
+    }
+}

@@ -1,0 +1,11 @@
+pragma solidcash ^0.51.0;
+// F3: `int` arithmetic on introspected satoshi values (at most 2^63) invokes the int256 range check on every
+// operation, although no result can leave int256. Compare with the bigint twin below.
+contract IntChecks(pubkey pk) {
+    function f(sig s) {
+        require(checkSig(s, pk));
+        int fee = tx.inputs[0].value - tx.outputs[0].value;
+        require(fee <= 1000);
+        require(tx.outputs[0].value + fee == tx.inputs[0].value);
+    }
+}

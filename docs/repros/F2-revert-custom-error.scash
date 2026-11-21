@@ -1,0 +1,10 @@
+pragma solidcash ^0.51.0;
+// F2: `revert E(args)` inside an `if` is a correct, working failure, yet solidc warns that it "is a no-op",
+// and prints the warning twice.
+error TooMany(bigint n);
+contract RevertWarning(pubkey pk) {
+    function f(sig s) {
+        require(checkSig(s, pk));
+        if (tx.outputs.length > 2) { revert TooMany(tx.outputs.length); }
+    }
+}

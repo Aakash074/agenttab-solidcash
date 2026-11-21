@@ -1,0 +1,10 @@
+pragma solidcash ^0.51.0;
+// F1 baseline: the same logic with two scalar locals.
+contract ScalarLocals(pubkey pk) {
+    function f(sig s, bigint x) {
+        require(checkSig(s, pk));
+        bigint a = tx.inputs[0].value;
+        bigint b = tx.outputs[0].value + x;
+        require(a >= b);
+    }
+}

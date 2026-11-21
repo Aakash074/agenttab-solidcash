@@ -145,7 +145,7 @@ describe('AgentTab.scash: the seven attacks', () => {
     const c = await setup();
     const v = signVoucher(c.agent.priv, c.tab, 5000n);
     const second = await addTabUtxo(c, BUDGET);
-    await covenantRejects(rawSettle({ ...c, tab: second }, { voucher: v }), /BadVoucher|checkDataSig|NULLFAIL|signature/i);
+    await covenantRejects(rawSettle({ ...c, tab: second }, { voucher: v }), /BadVoucher/);
     await send(rawSettle(c, { voucher: v })); // the honest settle of the first one still works
   });
 
@@ -167,15 +167,15 @@ describe('AgentTab.scash: the seven attacks', () => {
 
   it('3. forged amount: provider bumps the amount argument beyond what the voucher signs', async () => {
     const c = await setup();
-    await covenantRejects(rawSettle(c, { voucher: signVoucher(c.agent.priv, c.tab, 5000n), claimAmount: 50_000n }), /BadVoucher|checkDataSig|NULLFAIL|signature/i);
+    await covenantRejects(rawSettle(c, { voucher: signVoucher(c.agent.priv, c.tab, 5000n), claimAmount: 50_000n }), /BadVoucher/);
   });
 
   it('3b. forged voucher: signed by the provider or the owner key instead of the agent', async () => {
     const c = await setup();
     const forged = signVoucher(c.svc.priv, c.tab, 5000n);
     expect(verifyVoucher(c.agent.pub, forged)).toBe(false);
-    await covenantRejects(rawSettle(c, { voucher: forged }), /BadVoucher|checkDataSig|NULLFAIL|signature/i);
-    await covenantRejects(rawSettle(c, { voucher: signVoucher(c.owner.priv, c.tab, 5000n) }), /BadVoucher|checkDataSig|NULLFAIL|signature/i);
+    await covenantRejects(rawSettle(c, { voucher: forged }), /BadVoucher/);
+    await covenantRejects(rawSettle(c, { voucher: signVoucher(c.owner.priv, c.tab, 5000n) }), /BadVoucher/);
   });
 
   it('4. remainder elsewhere: owner output to another address, or short by one sat, is rejected', async () => {
@@ -206,9 +206,9 @@ describe('AgentTab.scash: the seven attacks', () => {
     c.provider.increaseTime(TIMEOUT - BigInt(c.provider.getBlockTime()) + 10n); // even after the timeout
     await covenantRejects(buildRefund({
       provider: c.provider, contract: c.contract, tabUtxo: c.tab, ownerPriv: c.agent.priv, timeout: TIMEOUT, to: p2pkhAddress(c.agent.pub),
-    }), /NotOwner|checkSig|NULLFAIL|signature/i);
-    await covenantRejects(buildCancel({ provider: c.provider, contract: c.contract, tabUtxo: c.tab, providerPriv: c.agent.priv, ownerPub: c.owner.pub }), /NotProvider|checkSig|NULLFAIL|signature/i);
-    await covenantRejects(rawSettle(c, { voucher: signVoucher(c.agent.priv, c.tab, 5000n), signer: c.agent.priv }), /NotProvider|checkSig|NULLFAIL|signature/i);
+    }), /NotOwner/);
+    await covenantRejects(buildCancel({ provider: c.provider, contract: c.contract, tabUtxo: c.tab, providerPriv: c.agent.priv, ownerPub: c.owner.pub }), /NotProvider/);
+    await covenantRejects(rawSettle(c, { voucher: signVoucher(c.agent.priv, c.tab, 5000n), signer: c.agent.priv }), /NotProvider/);
   });
 
   it('7. provider cancel into its own wallet, an excessive fee, a split, or a foreign key is rejected', async () => {
@@ -220,7 +220,7 @@ describe('AgentTab.scash: the seven attacks', () => {
     };
     await covenantRejects(cancel([{ to: p2pkhAddress(c.svc.pub), amount: BUDGET - 900n }]), /WrongPayee/);              // own wallet
     await covenantRejects(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 1_500n }]), /miner fee above 1000 sats/);          // fee above cap
-    await covenantRejects(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 900n }], c.owner.priv), /NotProvider|checkSig|NULLFAIL|signature/i); // owner key
+    await covenantRejects(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 900n }], c.owner.priv), /NotProvider/); // owner key
     await covenantRejects(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 5_000n }, { to: p2pkhAddress(c.svc.pub), amount: 4_000n }]), /WrongShape/); // split
     await send(cancel([{ to: p2pkhAddress(c.owner.pub), amount: BUDGET - 900n }]));                                     // honest
   });
@@ -230,12 +230,12 @@ describe('AgentTab.scash: more edges', () => {
   it('provider cannot use the refund path, even after the timeout', async () => {
     const c = await setup();
     c.provider.increaseTime(TIMEOUT - BigInt(c.provider.getBlockTime()) + 10n);
-    await covenantRejects(buildRefund({ provider: c.provider, contract: c.contract, tabUtxo: c.tab, ownerPriv: c.svc.priv, timeout: TIMEOUT }), /NotOwner|checkSig|NULLFAIL|signature/i);
+    await covenantRejects(buildRefund({ provider: c.provider, contract: c.contract, tabUtxo: c.tab, ownerPriv: c.svc.priv, timeout: TIMEOUT }), /NotOwner/);
   });
 
   it('a third party without the provider key cannot settle', async () => {
     const c = await setup();
-    await covenantRejects(rawSettle(c, { voucher: signVoucher(c.agent.priv, c.tab, 5000n), signer: key().priv }), /NotProvider|checkSig|NULLFAIL|signature/i);
+    await covenantRejects(rawSettle(c, { voucher: signVoucher(c.agent.priv, c.tab, 5000n), signer: key().priv }), /NotProvider/);
   });
 
   it('min bounds: a dust voucher and a dust remainder are rejected', async () => {
